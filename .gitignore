@@ -1,0 +1,49 @@
+
+# ---- CMake / 构建产物 ----
+build/
+out/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+*.sln
+*.slnx
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.recipe
+*.tlog
+*.lastbuildstate
+
+# ---- 编译中间件 / 可执行文件 ----
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.dll
+*.so
+*.dylib
+
+# ---- 打包 / 媒体 ----
+*.rar
+*.zip
+*.7z
+*.mp4
+*.avi
+*.png
+*.jpg
+
+# ---- IDE ----
+.vs/
+.vscode/
+*.suo
+*.user
+
+# ---- 系统 ----
+Thumbs.db
+.DS_Store
