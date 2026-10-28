@@ -22,7 +22,7 @@ namespace CameraEnumerator {
 // @return 设备列表（含索引与名称），无设备时为空
 QVector<CameraDevice> enumerate();
 
-// 生成下拉框中显示的设备文本。
+// 生成设备列表中显示的设备文本。
 // @param device 设备信息
 // @return 形如 "[0] USB Camera" 的显示文本，名称为空时显示 "(未知设备)"
 QString displayName(const CameraDevice& device);

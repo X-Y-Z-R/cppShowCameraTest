@@ -8,24 +8,75 @@
 #include "cameradevice.h"
 #include "capturethread.h"
 
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QCloseEvent>
-#include <QComboBox>
 #include <QDebug>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListWidget>
+#include <QListWidgetItem>
 #include <QPixmap>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QShowEvent>
+#include <QSize>
 #include <QSizePolicy>
 #include <QStatusBar>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QtGlobal>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
+namespace {
+
+#ifdef Q_OS_WIN
+// 应用 Windows 深色标题栏，避免系统白色标题栏与深色界面冲突。
+// 通过动态加载 dwmapi.dll 调用 DwmSetWindowAttribute，避免引入链接依赖，
+// 旧系统（不支持该属性）上失败时只是保持系统默认外观，不影响功能。
+// @param hwnd 目标窗口的原生句柄
+// @return true 表示深色标题栏属性设置成功
+bool applyDarkTitleBar(HWND hwnd) {
+    if (!hwnd) return false;
+
+    using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+    HMODULE dwmapi = ::LoadLibraryW(L"dwmapi.dll");
+    if (!dwmapi) return false;
+
+    auto setAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
+        ::GetProcAddress(dwmapi, "DwmSetWindowAttribute"));
+
+    bool applied = false;
+    if (setAttribute) {
+        const BOOL dark = TRUE;
+        // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE（Windows 10 20H1 / Windows 11）
+        if (SUCCEEDED(setAttribute(hwnd, 20, &dark, sizeof(dark)))) {
+            applied = true;
+        }
+        // 19 = 同一属性在早期 Windows 10 1809~1903 上的编号，作为兜底
+        if (!applied && SUCCEEDED(setAttribute(hwnd, 19, &dark, sizeof(dark)))) {
+            applied = true;
+        }
+    }
+
+    ::FreeLibrary(dwmapi);
+    return applied;
+}
+#endif
+
+} // namespace
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
-      m_deviceCombo(nullptr),
+      m_deviceList(nullptr),
+      m_deviceCaption(nullptr),
       m_toggleButton(nullptr),
       m_frameLabel(nullptr),
       m_stateLabel(nullptr),
@@ -37,6 +88,12 @@ MainWindow::MainWindow(QWidget* parent)
       m_frameCount(0) {
     setupUi();
     scanDevices();
+
+#ifdef Q_OS_WIN
+    // 提前创建原生句柄并设置深色标题栏，
+    // 使窗口首次显示时标题栏已是深色，避免“先白后黑”的闪烁
+    applyDarkTitleBar(reinterpret_cast<HWND>(winId()));
+#endif
 }
 
 MainWindow::~MainWindow() {
@@ -75,17 +132,21 @@ void MainWindow::setupUi() {
     auto* deviceLayout = new QVBoxLayout(deviceGroup);
     deviceLayout->setSpacing(8);
 
-    auto* deviceCaption = new QLabel(QStringLiteral("可用视频设备："), deviceGroup);
-    m_deviceCombo = new QComboBox(deviceGroup);
-    m_deviceCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    m_deviceCombo->setMinimumContentsLength(18);
+    // 设备列表：一次列出全部可用设备，替代只能显示一项的下拉框，
+    // 让“有几个设备、当前选中哪个”一眼可见
+    m_deviceCaption = new QLabel(QStringLiteral("可用视频设备："), deviceGroup);
+    m_deviceList = new QListWidget(deviceGroup);
+    m_deviceList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_deviceList->setUniformItemSizes(true);
+    m_deviceList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_deviceList->setToolTip(QStringLiteral("点击选择要预览的设备"));
 
     m_toggleButton = new QPushButton(QStringLiteral("打开设备"), deviceGroup);
     m_toggleButton->setMinimumHeight(36);
     connect(m_toggleButton, &QPushButton::clicked, this, &MainWindow::onToggleClicked);
 
-    deviceLayout->addWidget(deviceCaption);
-    deviceLayout->addWidget(m_deviceCombo);
+    deviceLayout->addWidget(m_deviceCaption);
+    deviceLayout->addWidget(m_deviceList);
     deviceLayout->addWidget(m_toggleButton);
 
     auto* infoGroup = new QGroupBox(QStringLiteral("设备信息"), panel);
@@ -127,8 +188,8 @@ void MainWindow::setupUi() {
 }
 
 void MainWindow::scanDevices() {
-    m_deviceCombo->clear();
-    m_deviceCombo->setEnabled(false);
+    m_deviceList->clear();
+    m_deviceList->setEnabled(false);
     statusBar()->showMessage(QStringLiteral("正在识别本机视频设备…"));
 
     // 枚举会逐个打开设备，放到窗口显示前完成，避免界面闪动
@@ -137,10 +198,24 @@ void MainWindow::scanDevices() {
     QApplication::restoreOverrideCursor();
 
     for (const CameraDevice& device : devices) {
-        m_deviceCombo->addItem(CameraEnumerator::displayName(device), device.id);
-        // UserRole + 1 保存不含索引的纯名称，便于信息面板显示
-        m_deviceCombo->setItemData(m_deviceCombo->count() - 1, device.name, Qt::UserRole + 1);
+        auto* item = new QListWidgetItem(CameraEnumerator::displayName(device),
+                                         m_deviceList);
+        // 固定行高，保证样式表内边距生效后文字不被裁切，也便于按数量计算列表高度
+        item->setSizeHint(QSize(0, 36));
+        // UserRole 保存 OpenCV 索引，UserRole + 1 保存不含索引的纯名称
+        item->setData(Qt::UserRole, device.id);
+        item->setData(Qt::UserRole + 1, device.name);
     }
+
+    if (!devices.isEmpty()) {
+        m_deviceList->setCurrentRow(0);   // 默认选中第一个，便于直接点“打开设备”
+    }
+    updateDeviceListHeight();
+
+    // 数量写进标题，明确告诉用户一共有几个设备可选
+    m_deviceCaption->setText(devices.isEmpty()
+                                 ? QStringLiteral("可用视频设备：")
+                                 : QStringLiteral("可用视频设备（共 %1 个）：").arg(devices.size()));
 
     m_state = State::Idle;
     updateUiState();
@@ -153,32 +228,49 @@ void MainWindow::scanDevices() {
     }
 }
 
+// 按设备数量调整列表高度（最多显示 5 行，超出后出现滚动条），
+// 避免只有 1 个设备时列表留出大片空白。
+void MainWindow::updateDeviceListHeight() {
+    int rowHeight = 34;   // sizeHintForRow 取不到时的兜底行高（与样式表内边距匹配）
+    if (m_deviceList->count() > 0) {
+        const int hint = m_deviceList->sizeHintForRow(0);
+        if (hint > 0) rowHeight = hint;
+    }
+
+    const int rows = qBound(1, m_deviceList->count(), 5);
+    // 上下各 1px 边框 + 各 4px 内边距（见 uitheme 中的 QListWidget 样式）+ 2px 余量，
+    // 保证内容区高度足够放下整行，避免出现多余的滚动条
+    constexpr int kVerticalChrome = 2 + 8 + 2;
+    const int height = rows * rowHeight + kVerticalChrome;
+    m_deviceList->setFixedHeight(height);
+}
+
 void MainWindow::updateUiState() {
-    const bool hasDevice = m_deviceCombo->count() > 0;
+    const bool hasDevice = m_deviceList->count() > 0;
 
     switch (m_state) {
     case State::Idle:
         m_toggleButton->setText(QStringLiteral("打开设备"));
         m_toggleButton->setEnabled(hasDevice);
-        m_deviceCombo->setEnabled(hasDevice);
+        m_deviceList->setEnabled(hasDevice);
         m_stateLabel->setText(QStringLiteral("状态：未连接"));
         break;
     case State::Opening:
         m_toggleButton->setText(QStringLiteral("取消"));
         m_toggleButton->setEnabled(true);
-        m_deviceCombo->setEnabled(false);
+        m_deviceList->setEnabled(false);
         m_stateLabel->setText(QStringLiteral("状态：正在打开"));
         break;
     case State::Streaming:
         m_toggleButton->setText(QStringLiteral("关闭设备"));
         m_toggleButton->setEnabled(true);
-        m_deviceCombo->setEnabled(false);
+        m_deviceList->setEnabled(false);
         m_stateLabel->setText(QStringLiteral("状态：预览中"));
         break;
     case State::Closing:
         m_toggleButton->setText(QStringLiteral("关闭中…"));
         m_toggleButton->setEnabled(false);
-        m_deviceCombo->setEnabled(false);
+        m_deviceList->setEnabled(false);
         m_stateLabel->setText(QStringLiteral("状态：正在关闭"));
         break;
     }
@@ -186,14 +278,15 @@ void MainWindow::updateUiState() {
 
 void MainWindow::onToggleClicked() {
     if (m_state == State::Idle) {
-        if (m_deviceCombo->count() <= 0) {
+        QListWidgetItem* current = m_deviceList->currentItem();
+        if (m_deviceList->count() <= 0 || !current) {
             statusBar()->showMessage(QStringLiteral("没有可选设备"));
             return;
         }
 
-        const int deviceId = m_deviceCombo->currentData().toInt();
-        const QString name = m_deviceCombo->currentData(Qt::UserRole + 1).toString();
-        m_currentDeviceName = name.isEmpty() ? m_deviceCombo->currentText() : name;
+        const int deviceId = current->data(Qt::UserRole).toInt();
+        const QString name = current->data(Qt::UserRole + 1).toString();
+        m_currentDeviceName = name.isEmpty() ? current->text() : name;
 
         m_lastFrame = QImage();
         m_lastError.clear();
@@ -319,6 +412,14 @@ void MainWindow::clearFrame() {
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
     updateFrameView();
+}
+
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+#ifdef Q_OS_WIN
+    // 句柄可能在显示阶段被重建，这里再应用一次（幂等），确保标题栏保持深色
+    applyDarkTitleBar(reinterpret_cast<HWND>(winId()));
+#endif
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {

@@ -84,6 +84,47 @@ QComboBox QAbstractItemView {
     selection-background-color: #3d8bfd;
     selection-color: #ffffff;
 }
+QListWidget {
+    background-color: #12151a;
+    border: 1px solid #2a2e37;
+    border-radius: 8px;
+    padding: 4px;
+    outline: 0;
+}
+QListWidget::item {
+    color: #e6e8eb;
+    padding: 8px 10px;
+    border-radius: 6px;
+}
+QListWidget::item:hover {
+    background-color: #262a33;
+}
+QListWidget::item:disabled {
+    color: #6b7280;
+}
+QListWidget::item:selected {
+    background-color: #3d8bfd;
+    color: #ffffff;
+}
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background-color: #2a2e37;
+    border-radius: 4px;
+    min-height: 24px;
+}
+QScrollBar::handle:vertical:hover {
+    background-color: #3d8bfd;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
 QPushButton {
     background-color: #3d8bfd;
     color: #ffffff;

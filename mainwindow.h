@@ -12,10 +12,11 @@
 #include <QString>
 
 class QCloseEvent;
-class QComboBox;
 class QLabel;
+class QListWidget;
 class QPushButton;
 class QResizeEvent;
+class QShowEvent;
 class CaptureThread;
 
 // 摄像头实时预览主窗口
@@ -38,6 +39,10 @@ protected:
     // 窗口尺寸变化：按新尺寸重新缩放当前画面。
     // @param event 尺寸变化事件
     void resizeEvent(QResizeEvent* event) override;
+
+    // 窗口显示：确保 Windows 深色标题栏在可见前已生效。
+    // @param event 显示事件
+    void showEvent(QShowEvent* event) override;
 
 private slots:
     // 打开 / 关闭按钮点击。
@@ -71,10 +76,13 @@ private:
     // 创建界面控件与布局。
     void setupUi();
 
-    // 扫描本机设备并填充下拉框。
+    // 扫描本机设备并填充设备列表。
     void scanDevices();
 
-    // 根据当前状态刷新按钮、下拉框与状态文本。
+    // 按设备数量调整列表高度（最多 5 行），避免少量设备时列表留大片空白。
+    void updateDeviceListHeight();
+
+    // 根据当前状态刷新按钮、设备列表与状态文本。
     void updateUiState();
 
     // 按标签当前尺寸缩放并显示最后一帧。
@@ -86,19 +94,20 @@ private:
     // 请求关闭采集（异步，等待线程结束信号后清理）。
     void stopCapture();
 
-    QComboBox*     m_deviceCombo;      ///< 设备下拉框
-    QPushButton*   m_toggleButton;     ///< 打开 / 关闭按钮
-    QLabel*        m_frameLabel;       ///< 画面显示区域
-    QLabel*        m_stateLabel;       ///< 连接状态文本
-    QLabel*        m_deviceNameLabel;  ///< 设备名称文本
-    QLabel*        m_resolutionLabel;  ///< 分辨率文本
-    QLabel*        m_fpsLabel;         ///< 帧率文本
+    QListWidget*   m_deviceList;        ///< 可用设备列表（全部设备一次列出）
+    QLabel*        m_deviceCaption;     ///< 设备数量提示
+    QPushButton*   m_toggleButton;      ///< 打开 / 关闭按钮
+    QLabel*        m_frameLabel;        ///< 画面显示区域
+    QLabel*        m_stateLabel;        ///< 连接状态文本
+    QLabel*        m_deviceNameLabel;   ///< 设备名称文本
+    QLabel*        m_resolutionLabel;   ///< 分辨率文本
+    QLabel*        m_fpsLabel;          ///< 帧率文本
 
-    CaptureThread* m_capture;          ///< 当前采集线程，未打开时为空
-    State          m_state;            ///< 当前状态
-    QImage         m_lastFrame;        ///< 最近一帧画面
-    QElapsedTimer  m_fpsClock;         ///< 帧率统计时钟
-    qint64         m_frameCount;       ///< 统计周期内的帧数
-    QString        m_currentDeviceName;///< 当前设备名称
-    QString        m_lastError;        ///< 最近一次错误信息
+    CaptureThread* m_capture;           ///< 当前采集线程，未打开时为空
+    State          m_state;             ///< 当前状态
+    QImage         m_lastFrame;         ///< 最近一帧画面
+    QElapsedTimer  m_fpsClock;          ///< 帧率统计时钟
+    qint64         m_frameCount;        ///< 统计周期内的帧数
+    QString        m_currentDeviceName; ///< 当前设备名称
+    QString        m_lastError;         ///< 最近一次错误信息
 };
