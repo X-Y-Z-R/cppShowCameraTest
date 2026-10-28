@@ -7,9 +7,11 @@
 
 #include "cameradevice.h"
 #include "capturethread.h"
+#include "processorthread.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QDebug>
 #include <QGroupBox>
@@ -24,9 +26,12 @@
 #include <QSize>
 #include <QSizePolicy>
 #include <QStatusBar>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QtGlobal>
+
+#include <memory>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -36,6 +41,13 @@
 #endif
 
 namespace {
+
+// 三线程流水线相关常量
+constexpr int kDisplayIntervalMs    = 33;   ///< 界面取帧刷新间隔（约 30 FPS）
+constexpr int kStatsIntervalMs      = 1000; ///< 状态栏监控刷新间隔
+constexpr int kSlowProcessDelayMs   = 100;  ///< 勾选“模拟处理耗时”时的每帧延时
+constexpr int kQueueCapacity        = 4;    ///< 帧队列容量（满则丢最旧）
+constexpr int kThreadStopTimeoutMs  = 3000; ///< 线程退出等待上限
 
 #ifdef Q_OS_WIN
 // 应用 Windows 深色标题栏，避免系统白色标题栏与深色界面冲突。
@@ -78,16 +90,34 @@ MainWindow::MainWindow(QWidget* parent)
       m_deviceList(nullptr),
       m_deviceCaption(nullptr),
       m_toggleButton(nullptr),
+      m_slowProcessCheck(nullptr),
       m_frameLabel(nullptr),
       m_stateLabel(nullptr),
       m_deviceNameLabel(nullptr),
       m_resolutionLabel(nullptr),
       m_fpsLabel(nullptr),
+      m_statsLabel(nullptr),
       m_capture(nullptr),
+      m_processor(nullptr),
+      m_displayTimer(nullptr),
+      m_statsTimer(nullptr),
       m_state(State::Idle),
-      m_frameCount(0) {
+      m_captureFps(0.0),
+      m_processFps(0.0),
+      m_captureQueue(std::make_shared<FrameQueue>(kQueueCapacity)),
+      m_displayQueue(std::make_shared<FrameQueue>(kQueueCapacity)) {
     setupUi();
     scanDevices();
+
+    // 界面刷帧定时器：处理线程的节奏再慢，界面也只按固定节拍取最新帧
+    m_displayTimer = new QTimer(this);
+    m_displayTimer->setInterval(kDisplayIntervalMs);
+    connect(m_displayTimer, &QTimer::timeout, this, &MainWindow::onDisplayTick);
+
+    // 心跳 / 状态监控定时器：刷新帧率与队列深度
+    m_statsTimer = new QTimer(this);
+    m_statsTimer->setInterval(kStatsIntervalMs);
+    connect(m_statsTimer, &QTimer::timeout, this, &MainWindow::onStatsTick);
 
 #ifdef Q_OS_WIN
     // 提前创建原生句柄并设置深色标题栏，
@@ -97,6 +127,7 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    // 先停采集（生产者），再停处理（消费者），队列已关闭可让等待立即返回
     if (m_capture) {
         QObject::disconnect(m_capture, nullptr, this, nullptr);
         const bool stopped = m_capture->stop(2000);
@@ -109,7 +140,12 @@ MainWindow::~MainWindow() {
         }
         m_capture = nullptr;
     }
+
+    m_captureQueue->close();
+    m_displayQueue->close();
+    shutdownProcessor();
 }
+
 
 void MainWindow::setupUi() {
     setWindowTitle(QStringLiteral("摄像头实时预览 - Qt 上位机"));
@@ -145,9 +181,20 @@ void MainWindow::setupUi() {
     m_toggleButton->setMinimumHeight(36);
     connect(m_toggleButton, &QPushButton::clicked, this, &MainWindow::onToggleClicked);
 
+    // 验收辅助：勾选后处理线程每帧额外 sleep 100ms，用于验证界面依旧流畅
+    m_slowProcessCheck = new QCheckBox(QStringLiteral("模拟处理耗时 100 ms"), deviceGroup);
+    m_slowProcessCheck->setToolTip(
+        QStringLiteral("勾选后处理线程每帧额外等待 100ms，用于验证采集 / 处理 / 界面解耦效果"));
+    connect(m_slowProcessCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_processor) {
+            m_processor->setArtificialDelayMs(checked ? kSlowProcessDelayMs : 0);
+        }
+    });
+
     deviceLayout->addWidget(m_deviceCaption);
     deviceLayout->addWidget(m_deviceList);
     deviceLayout->addWidget(m_toggleButton);
+    deviceLayout->addWidget(m_slowProcessCheck);
 
     auto* infoGroup = new QGroupBox(QStringLiteral("设备信息"), panel);
     auto* infoLayout = new QVBoxLayout(infoGroup);
@@ -184,8 +231,14 @@ void MainWindow::setupUi() {
     rootLayout->addWidget(m_frameLabel, 1);
     setCentralWidget(central);
 
+    // 状态栏常驻监控：采集帧率 / 处理帧率 / 两个队列的深度
+    m_statsLabel = new QLabel(QStringLiteral("采集 -- │ 处理 -- │ 队列 --"), this);
+    m_statsLabel->setToolTip(QStringLiteral("采集帧率 │ 处理帧率 │ 采集队列 / 显示队列深度"));
+    statusBar()->addPermanentWidget(m_statsLabel);
+
     statusBar()->showMessage(QStringLiteral("就绪"));
 }
+
 
 void MainWindow::scanDevices() {
     m_deviceList->clear();
@@ -278,6 +331,12 @@ void MainWindow::updateUiState() {
 
 void MainWindow::onToggleClicked() {
     if (m_state == State::Idle) {
+        if (m_processor) {
+            // 上一轮处理线程尚未完全退出，等其结束再重新打开，避免线程对象重叠
+            statusBar()->showMessage(QStringLiteral("上一路处理线程正在退出，请稍候…"));
+            return;
+        }
+
         QListWidgetItem* current = m_deviceList->currentItem();
         if (m_deviceList->count() <= 0 || !current) {
             statusBar()->showMessage(QStringLiteral("没有可选设备"));
@@ -290,17 +349,35 @@ void MainWindow::onToggleClicked() {
 
         m_lastFrame = QImage();
         m_lastError.clear();
+        m_captureFps = 0.0;
+        m_processFps = 0.0;
 
-        // 无父对象：线程结束后由 onCaptureFinished 释放
-        m_capture = new CaptureThread(deviceId);
+        // 队列重新打开并清空上一轮的残留帧
+        m_captureQueue->reopen();
+        m_displayQueue->reopen();
+
+        // 处理线程：从采集队列取帧 → 处理 → 写入显示队列
+        m_processor = new ProcessThread(m_captureQueue, m_displayQueue);
+        m_processor->setArtificialDelayMs(m_slowProcessCheck->isChecked()
+                                              ? kSlowProcessDelayMs
+                                              : 0);
+        connect(m_processor, &ProcessThread::statsUpdated, this, &MainWindow::onProcessStats);
+        connect(m_processor, &QThread::finished, this, &MainWindow::onProcessorFinished);
+
+        // 采集线程：只负责读帧并写入采集队列；原始名称用于断流后重新定位设备索引
+        m_capture = new CaptureThread(deviceId, name, m_captureQueue);
         connect(m_capture, &CaptureThread::opened, this, &MainWindow::onCaptureOpened);
-        connect(m_capture, &CaptureThread::frameReady, this, &MainWindow::onFrameReady);
         connect(m_capture, &CaptureThread::errorOccurred, this, &MainWindow::onCaptureError);
+        connect(m_capture, &CaptureThread::logMessage, this, &MainWindow::onCaptureLog);
+        connect(m_capture, &CaptureThread::statsUpdated, this, &MainWindow::onCaptureStats);
         connect(m_capture, &QThread::finished, this, &MainWindow::onCaptureFinished);
 
         m_state = State::Opening;
         updateUiState();
         statusBar()->showMessage(QStringLiteral("正在打开设备索引 %1…").arg(deviceId));
+
+        // 先启动消费者再启动生产者，避免采集线程首帧入队时没有消费者
+        m_processor->start();
         m_capture->start();
     } else if (m_state == State::Opening || m_state == State::Streaming) {
         stopCapture();
@@ -308,7 +385,7 @@ void MainWindow::onToggleClicked() {
 }
 
 void MainWindow::stopCapture() {
-    if (!m_capture) {
+    if (!m_capture && !m_processor) {
         m_state = State::Idle;
         updateUiState();
         return;
@@ -318,44 +395,87 @@ void MainWindow::stopCapture() {
     updateUiState();
     statusBar()->showMessage(QStringLiteral("正在关闭设备…"));
 
-    // 关闭过程中不再接收画面与打开通知，避免刷新已关闭的画面
-    disconnect(m_capture, &CaptureThread::frameReady, this, nullptr);
-    disconnect(m_capture, &CaptureThread::opened, this, nullptr);
-    disconnect(m_capture, &CaptureThread::errorOccurred, this, nullptr);
+    m_displayTimer->stop();
+    m_statsTimer->stop();
 
-    m_capture->requestStop();   // 异步停止，线程结束后由 finished 信号清理
+    // 关闭过程中不再接收画面与打开通知
+    if (m_capture) {
+        disconnect(m_capture, &CaptureThread::opened, this, nullptr);
+        disconnect(m_capture, &CaptureThread::errorOccurred, this, nullptr);
+        disconnect(m_capture, &CaptureThread::logMessage, this, nullptr);
+        disconnect(m_capture, &CaptureThread::statsUpdated, this, nullptr);
+        m_capture->requestStop();   // 异步停止，线程结束后由 finished 信号清理
+    }
+    if (m_processor) {
+        disconnect(m_processor, &ProcessThread::statsUpdated, this, nullptr);
+        m_processor->requestStop();
+    }
+
+    // 关闭队列：唤醒阻塞在 pop 的消费者，并阻止采集线程继续入队
+    m_captureQueue->close();
+    m_displayQueue->close();
 }
 
 void MainWindow::onCaptureOpened(int width, int height) {
-    if (m_state != State::Opening) return;   // 打开过程中被取消则忽略
+    // Opening：首次打开；Streaming：断流后重连成功，只需刷新分辨率
+    if (m_state != State::Opening && m_state != State::Streaming) return;
 
-    m_state = State::Streaming;
     m_deviceNameLabel->setText(QStringLiteral("设备：%1").arg(m_currentDeviceName));
     m_resolutionLabel->setText(QStringLiteral("分辨率：%1 × %2").arg(width).arg(height));
-    m_fpsLabel->setText(QStringLiteral("帧率：--"));
-    m_frameCount = 0;
-    m_fpsClock.start();
 
+    if (m_state == State::Streaming) {
+        statusBar()->showMessage(QStringLiteral("设备断流后已重新连接，恢复预览"));
+        return;
+    }
+
+    m_state = State::Streaming;
+    m_fpsLabel->setText(QStringLiteral("帧率：--"));
     updateUiState();
+    updateStatsLabel();
+    m_displayTimer->start();
+    m_statsTimer->start();
     statusBar()->showMessage(QStringLiteral("正在显示设备 %1 的实时画面").arg(m_currentDeviceName));
 }
 
-void MainWindow::onFrameReady(const QImage& image) {
-    if (image.isNull()) return;
-    if (m_state != State::Streaming) return;   // 丢弃关闭过程中的残留帧
-
-    m_lastFrame = image;
-    updateFrameView();
-
-    ++m_frameCount;
-    const qint64 elapsed = m_fpsClock.elapsed();
-    if (elapsed >= 1000) {
-        const double fps = static_cast<double>(m_frameCount) * 1000.0 /
-                           static_cast<double>(elapsed);
+void MainWindow::onCaptureStats(double fps) {
+    m_captureFps = fps;
+    if (m_state == State::Streaming) {
         m_fpsLabel->setText(QStringLiteral("帧率：%1 FPS").arg(fps, 0, 'f', 1));
-        m_frameCount = 0;
-        m_fpsClock.restart();
+        updateStatsLabel();
     }
+}
+
+void MainWindow::onProcessStats(double fps) {
+    m_processFps = fps;
+    if (m_state == State::Streaming) updateStatsLabel();
+}
+
+void MainWindow::onCaptureLog(const QString& message) {
+    statusBar()->showMessage(message);
+}
+
+void MainWindow::onDisplayTick() {
+    if (m_state != State::Streaming) return;
+
+    // 非阻塞取最新处理结果；取不到就保持上一帧，绝不卡住界面
+    QImage frame;
+    if (!m_displayQueue->takeLatest(frame) || frame.isNull()) return;
+
+    m_lastFrame = frame;
+    updateFrameView();
+}
+
+void MainWindow::onStatsTick() {
+    if (m_state == State::Streaming || m_state == State::Opening) updateStatsLabel();
+}
+
+void MainWindow::updateStatsLabel() {
+    m_statsLabel->setText(
+        QStringLiteral("采集 %1 FPS │ 处理 %2 FPS │ 队列 %3 / %4")
+            .arg(m_captureFps, 0, 'f', 1)
+            .arg(m_processFps, 0, 'f', 1)
+            .arg(m_captureQueue->size())
+            .arg(m_displayQueue->size()));
 }
 
 void MainWindow::onCaptureError(const QString& message) {
@@ -368,6 +488,16 @@ void MainWindow::onCaptureFinished() {
 
     m_capture->deleteLater();
     m_capture = nullptr;
+
+    // 采集已结束：停止界面刷新与监控，关闭队列促使处理线程退出
+    m_displayTimer->stop();
+    m_statsTimer->stop();
+    m_captureQueue->close();
+    m_displayQueue->close();
+    if (m_processor) {
+        disconnect(m_processor, &ProcessThread::statsUpdated, this, nullptr);
+        m_processor->requestStop();
+    }
 
     const QString error = m_lastError;
     m_lastError.clear();
@@ -385,6 +515,27 @@ void MainWindow::onCaptureFinished() {
         statusBar()->showMessage(error);
     }
 }
+
+void MainWindow::onProcessorFinished() {
+    if (!m_processor) return;
+
+    m_processor->deleteLater();
+    m_processor = nullptr;
+}
+
+void MainWindow::shutdownProcessor() {
+    if (!m_processor) return;
+
+    QObject::disconnect(m_processor, nullptr, this, nullptr);
+    if (m_processor->stop(kThreadStopTimeoutMs)) {
+        delete m_processor;
+    } else {
+        // 与采集线程一致：不析构运行中的 QThread，交由进程退出回收
+        qWarning() << "MainWindow: 处理线程未能在超时内退出";
+    }
+    m_processor = nullptr;
+}
+
 
 void MainWindow::updateFrameView() {
     if (m_lastFrame.isNull()) return;
@@ -406,8 +557,15 @@ void MainWindow::clearFrame() {
     m_deviceNameLabel->setText(QStringLiteral("设备：--"));
     m_resolutionLabel->setText(QStringLiteral("分辨率：--"));
     m_fpsLabel->setText(QStringLiteral("帧率：--"));
-    m_frameCount = 0;
+
+    // 清空流水线残留数据与统计值
+    m_captureQueue->clear();
+    m_displayQueue->clear();
+    m_captureFps = 0.0;
+    m_processFps = 0.0;
+    m_statsLabel->setText(QStringLiteral("采集 -- │ 处理 -- │ 队列 --"));
 }
+
 
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
@@ -423,6 +581,13 @@ void MainWindow::showEvent(QShowEvent* event) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    m_displayTimer->stop();
+    m_statsTimer->stop();
+
+    // 先关队列再停采集，能让阻塞中的读帧 / 取帧尽快返回
+    m_captureQueue->close();
+    m_displayQueue->close();
+
     if (m_capture) {
         QObject::disconnect(m_capture, nullptr, this, nullptr);
         const bool stopped = m_capture->stop(2000);
@@ -435,5 +600,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         m_capture = nullptr;
         m_state = State::Idle;
     }
+
+    shutdownProcessor();
     event->accept();
 }

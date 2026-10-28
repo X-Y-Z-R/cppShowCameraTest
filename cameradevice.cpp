@@ -108,3 +108,11 @@ QString CameraEnumerator::displayName(const CameraDevice& device) {
     const QString name = device.name.isEmpty() ? QStringLiteral("(未知设备)") : device.name;
     return QStringLiteral("[%1] %2").arg(device.id).arg(name);
 }
+
+QStringList CameraEnumerator::deviceNames() {
+#ifdef _WIN32
+    return getDeviceFriendlyNames();
+#else
+    return QStringList();
+#endif
+}

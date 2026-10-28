@@ -6,6 +6,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 // 视频采集设备信息
@@ -26,5 +27,11 @@ QVector<CameraDevice> enumerate();
 // @param device 设备信息
 // @return 形如 "[0] USB Camera" 的显示文本，名称为空时显示 "(未知设备)"
 QString displayName(const CameraDevice& device);
+
+// 读取当前所有视频设备的友好名称（仅枚举名称，不打开设备）。
+// 名称顺序与 OpenCV DSHOW 后端的设备索引一一对应。
+// 用于断流重连：拔插后设备在列表中的顺序可能变化，按名称定位比沿用旧索引可靠。
+// @return 设备名称列表；非 Windows 或枚举失败时为空列表
+QStringList deviceNames();
 
 } // namespace CameraEnumerator

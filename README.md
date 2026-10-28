@@ -22,9 +22,12 @@
 | 设备枚举 | 遍历索引 `0..11` 逐个 `open` 探测，连续 3 次失败即判定枚举结束 |
 | 友好名称 | 通过 DirectShow `ICreateDevEnum` 读取 `FriendlyName`，顺序与 OpenCV 的 DSHOW 后端一致 |
 | Qt 界面 | `QMainWindow` + 左侧 `QListWidget` 设备列表 / `QPushButton`，右侧 `QLabel` 显示画面 |
-| 异步采集 | `CaptureThread` 在独立线程读帧，按 30ms 节流后通过信号槽送显，界面不阻塞 |
+| 三线程架构 | 采集线程 → 有界帧队列 → 处理线程 → 显示队列 → 界面 `QTimer`，采集与显示彻底解耦 |
+| 有界帧队列 | `FrameQueue`（`std::mutex` + `std::condition_variable`，容量 4），满时丢最旧帧，宁丢帧不堆积 |
+| 断流重连 | 3 类判定：最近 10 次读帧失败 ≥5 次、3s 无有效画面、画面位级完全不变超 3s（拔掉 USB 后 DSHOW 常“读取成功”但反复给同一黑帧）；判定后释放设备、按设备名重定位索引并每秒重试 |
+| 状态监控 | 状态栏实时显示采集帧率、处理帧率与两个队列的深度（心跳监控） |
 | 帧显示 | `cv::Mat` → BGR→RGB → `QImage::Format_RGB888`（深拷贝）→ `QPixmap` 等比缩放 |
-| 状态统计 | 实时显示连接状态、设备名、分辨率与帧率 |
+| 状态统计 | 实时显示连接状态、设备名、分辨率与采集帧率 |
 | 中文显示 | Qt 原生 UTF-8，设备名与界面文本不再乱码 |
 | 界面主题 | `UiTheme` 统一 Fusion 风格 + 深色调色板 + 全局面板样式表，圆角卡片、强调色按钮，Qt 5.15 / Qt 6.x 外观一致 |
 | 深色标题栏 | Windows 下通过 DWM `DwmSetWindowAttribute` 把系统标题栏同步为深色，避免白标题栏与深色界面割裂 |
@@ -108,11 +111,16 @@ cppShowCameraTest.exe
 | --- | --- |
 | 设备枚举 | `CameraEnumerator::enumerate()`：`ICreateDevEnum` 读名称 + 逐索引探测 |
 | 探测策略 | 逐索引 `open`（Windows 固定 `CAP_DSHOW`），连续 3 次失败停止，避免 USB 设备漏检 |
-| 采集线程 | `CaptureThread` 继承 `QThread`，`run()` 内完成打开、读帧、释放，避免跨线程使用 `VideoCapture` |
-| 信号槽 | `opened` / `frameReady` / `errorOccurred` / `finished` 以队列连接回到界面线程 |
+| 采集线程 | `CaptureThread` 继承 `QThread`，`run()` 内完成打开、读帧、入队，避免跨线程使用 `VideoCapture` |
+| 处理线程 | `ProcessThread` 从采集队列取帧，执行 `processFrame()`（阶段 3 检测入口）后写入显示队列 |
+| 帧队列 | `FrameQueue` 用互斥锁 + 条件变量实现阻塞取帧；满容量时丢最旧帧，界面用 `takeLatest()` 只取最新帧 |
+| 界面刷帧 | `QTimer`（33ms）从显示队列非阻塞取帧，处理线程再慢只影响画面更新率，不影响界面响应 |
+| 信号槽 | 采集 / 处理线程的 `opened` / `logMessage` / `statsUpdated` / `errorOccurred` / `finished` 以队列连接回到界面线程 |
+| 断流重连 | 滑动窗口统计读帧失败（成功与失败交替也能触发）+ 无有效画面看门狗 + 画面停滞检测（成功读到但内容不变）；重连时按 FriendlyName 重新定位索引（拔插后索引可能变化），按 1s 间隔重试并打印日志 |
+| 状态监控 | 状态栏常驻显示采集帧率、处理帧率与采集 / 显示队列深度，`clearFrame()` 时归零 |
 | 帧转换 | `cvtColor(BGR→RGB)` 后用 Mat 内存构造 `QImage`，立即 `copy()` 深拷贝，防止缓冲区复用导致撕裂 |
-| 节流 | 目标帧间隔 30ms，高帧率设备也不会刷爆界面 |
-| 关闭流程 | 按钮关闭为异步停止；窗口关闭时阻塞等待线程退出，确保设备被释放 |
+| 节流 | 目标帧间隔 30ms，高帧率设备也不会刷爆队列 |
+| 关闭流程 | 按钮关闭为异步停止（关队列唤醒消费者）；窗口关闭时阻塞等待采集与处理线程退出，确保设备被释放 |
 | 深色标题栏 | `MainWindow` 构造 / 首次显示时调用 DWM `DwmSetWindowAttribute`（属性 20，旧系统回退 19），失败则保持系统默认 |
 
 ## 目录结构
@@ -122,7 +130,9 @@ cppShowCameraTest/
 ├── main.cpp            # 程序入口：QApplication + 主窗口
 ├── mainwindow.h/.cpp   # 主窗口：布局、状态机、帧显示
 ├── uitheme.h/.cpp      # 界面主题：Fusion 风格 + 深色调色板 + 全局样式表
-├── capturethread.h/.cpp# 采集线程：打开设备、读帧、Mat→QImage
+├── capturethread.h/.cpp# 采集线程：打开设备、读帧、Mat→QImage、断流重连
+├── processorthread.h/.cpp# 处理线程：取帧 → 处理 → 写显示队列
+├── framequeue.h/.cpp   # 有界阻塞帧队列（生产者-消费者）
 ├── cameradevice.h/.cpp # 设备枚举：DirectShow 名称 + OpenCV 索引探测
 ├── CMakeLists.txt      # CMake 构建脚本（Qt + OpenCV + 运行库部署）
 ├── README.md
@@ -180,14 +190,16 @@ F:\Qt\5.15.2\msvc2019_64\bin\windeployqt.exe build\Release\cppShowCameraTest.exe
 
 ## 当前范围
 
-已实现：设备枚举与友好名称、Qt 设备列表选择、打开/关闭、单设备实时预览、分辨率与帧率统计、中文显示。
+已实现：设备枚举与友好名称、Qt 设备列表选择、打开/关闭、单设备实时预览、分辨率与帧率统计、中文显示、
+采集 / 处理 / 界面三线程流水线（有界帧队列、断流重连、状态栏心跳监控）。
 
-暂未实现：正式的多线程生产级改造（线程池 / 帧队列）、动态切换分辨率、录制、多设备同时预览、记住上次选择的设备。
+暂未实现：正式检测 / 跟踪算法（阶段 3 起在 `ProcessThread::processFrame()` 接入）、动态切换分辨率、录制、多设备同时预览、记住上次选择的设备。
 
 ## 版本记录
 
 | 版本 | 内容 |
 | --- | --- |
+| v2.2.0 | 阶段 2：采集 / 处理 / 界面三线程解耦，`FrameQueue` 有界阻塞队列（满丢最旧），断流自动重连，状态栏帧率与队列深度监控 |
 | v2.1.1 | 界面细节：设备由下拉框改为全部列出的列表（标题显示总数、按数量自适应高度），Windows 标题栏改为深色 |
 | v2.1.0 | 界面主题现代化：新增 `uitheme`，Fusion 风格 + 深色调色板 + 全局样式表，统一圆角与强调色 |
 | v2.0.0 | 阶段 1：OpenCV 原生窗口替换为 Qt 界面，采集线程化，设备列表改用下拉框 |
