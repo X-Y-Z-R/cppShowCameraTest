@@ -1,6 +1,7 @@
 
 # ---- CMake / 构建产物 ----
 build/
+build-qt6/
 out/
 cmake-build-*/
 CMakeCache.txt

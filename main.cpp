@@ -13,6 +13,7 @@
 #include <QtGlobal>
 
 #include "mainwindow.h"
+#include "uitheme.h"
 
 // 程序入口：创建 Qt 应用与主窗口。
 // @param argc 命令行参数个数
@@ -27,6 +28,10 @@ int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("cppShowCameraTest"));
     app.setApplicationDisplayName(QStringLiteral("摄像头实时预览"));
+
+    // 统一界面风格：Fusion + 深色调色板 + 样式表，
+    // 与 Qt 版本无关，Win10 下也能得到现代化的扁平外观
+    UiTheme::apply(app);
 
     MainWindow window;
     window.show();

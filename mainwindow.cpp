@@ -115,7 +115,8 @@ void MainWindow::setupUi() {
     m_frameLabel->setMinimumSize(640, 480);
     m_frameLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_frameLabel->setStyleSheet(QStringLiteral(
-        "QLabel#frameLabel { background-color: #1b1b1b; color: #9a9a9a; font-size: 16px; }"));
+        "QLabel#frameLabel { background-color: #0e1013; border: 1px solid #2a2e37; "
+        "color: #6b7280; font-size: 15px; }"));
     m_frameLabel->setText(QStringLiteral("未打开设备"));
 
     rootLayout->addWidget(panel);

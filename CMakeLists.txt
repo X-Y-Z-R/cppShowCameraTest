@@ -31,6 +31,8 @@ add_executable(cppShowCameraTest
     capturethread.cpp
     cameradevice.h
     cameradevice.cpp
+    uitheme.h
+    uitheme.cpp
 )
 
 target_include_directories(cppShowCameraTest PRIVATE ${OpenCV_INCLUDE_DIRS})

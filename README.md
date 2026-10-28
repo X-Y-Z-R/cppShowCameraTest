@@ -26,6 +26,7 @@
 | 帧显示 | `cv::Mat` → BGR→RGB → `QImage::Format_RGB888`（深拷贝）→ `QPixmap` 等比缩放 |
 | 状态统计 | 实时显示连接状态、设备名、分辨率与帧率 |
 | 中文显示 | Qt 原生 UTF-8，设备名与界面文本不再乱码 |
+| 界面主题 | `UiTheme` 统一 Fusion 风格 + 深色调色板 + 全局面板样式表，圆角卡片、强调色按钮，Qt 5.15 / Qt 6.x 外观一致 |
 
 ## 环境要求
 
@@ -34,7 +35,7 @@
 | 操作系统 | Windows 10 / 11（x64） |
 | 编译器 | MSVC 2019 / 2022，需支持 C++17 |
 | 构建工具 | CMake 3.16 及以上 |
-| Qt | 5.15.x 或 6.x（Widgets 模块） |
+| Qt | 5.15.x 或 6.x（Widgets 模块），开发环境实测 5.15.2 / 6.8.3 |
 | OpenCV | 4.x（开发环境为 4.1.2，对应 `opencv_world4120.dll`） |
 
 > DirectShow 相关代码仅在 Windows 下生效；其他平台只有 OpenCV 基础回退分支，未做测试。
@@ -60,7 +61,10 @@ set(OpenCV_DIR "D:/opencv/build/x64/vc16/lib")
 > ⚠️ 这里用的是普通 `set()`，会覆盖命令行传入的 `-DOpenCV_DIR`，所以**必须直接改这一行**，传参不生效。
 
 - **Qt**：CMake 优先查找 Qt6，再查找 Qt5。若未自动找到，可设置环境变量 `Qt5_DIR` / `Qt6_DIR`，
-  或配置时追加 `-DCMAKE_PREFIX_PATH=F:/Qt/5.15.2/msvc2019_64`。
+  或配置时追加 `-DCMAKE_PREFIX_PATH=F:/Qt/5.15.2/msvc2019_64`（Qt6 则用 `F:/Qt/6.8.3/msvc2022_64`）。
+
+> 切换 Qt 版本时请使用**新的构建目录**：`CMAKE_PREFIX_PATH` / `Qt5_DIR` 会写入 `CMakeCache.txt`，
+> 在旧目录里改参数不会生效，界面也仍然是旧 Qt 的产物。
 
 ### 3. 构建
 
@@ -115,6 +119,7 @@ cppShowCameraTest.exe
 cppShowCameraTest/
 ├── main.cpp            # 程序入口：QApplication + 主窗口
 ├── mainwindow.h/.cpp   # 主窗口：布局、状态机、帧显示
+├── uitheme.h/.cpp      # 界面主题：Fusion 风格 + 深色调色板 + 全局样式表
 ├── capturethread.h/.cpp# 采集线程：打开设备、读帧、Mat→QImage
 ├── cameradevice.h/.cpp # 设备枚举：DirectShow 名称 + OpenCV 索引探测
 ├── CMakeLists.txt      # CMake 构建脚本（Qt + OpenCV + 运行库部署）
@@ -153,6 +158,13 @@ F:\Qt\5.15.2\msvc2019_64\bin\windeployqt.exe build\Release\cppShowCameraTest.exe
 
 - 若还提示缺少 `vcruntime140.dll` / `msvcp140.dll`，安装对应版本的 VC++ 运行库。
 
+### 界面风格偏旧，升级 Qt 版本能变好看吗
+
+- Qt 5.15 与 Qt 6.x 在 Windows 10 上默认都使用 `windowsvista` 原生风格，升级 Qt **不会**改变控件外观；
+- Qt 6.7+ 新增的 `windows11` 风格（`qmodernwindowsstyle` 插件）只在 Windows 11 生效，Win10 不会启用；
+- 真正决定外观的是 `uitheme.cpp`：它强制 `Fusion` 风格并叠加深色调色板与样式表，因此该文件与 Qt 版本无关；
+- 想换配色 / 圆角 / 强调色，只需改 `uitheme.cpp` 顶部的颜色常量与 `kStyleSheet` 字符串，无需重新选 Qt。
+
 ### 点击关闭设备后短时间无响应
 
 - 采集线程可能正阻塞在 `cap.read()` 等待下一帧，通常在一个帧周期（约 33ms）内退出；
@@ -168,6 +180,7 @@ F:\Qt\5.15.2\msvc2019_64\bin\windeployqt.exe build\Release\cppShowCameraTest.exe
 
 | 版本 | 内容 |
 | --- | --- |
+| v2.1.0 | 界面主题现代化：新增 `uitheme`，Fusion 风格 + 深色调色板 + 全局样式表，统一圆角与强调色 |
 | v2.0.0 | 阶段 1：OpenCV 原生窗口替换为 Qt 界面，采集线程化，设备列表改用下拉框 |
 | v1.0.0 | 首个版本：设备枚举、鼠标选择、实时预览 |
 
