@@ -1,365 +1,149 @@
-
 # cppShowCameraTest
 
-一个基于 **C++17 + OpenCV + DirectShow** 的 Windows 摄像头 / 采集卡枚举与实时预览小工具。
+> 基于 **C++17 + OpenCV + DirectShow** 的 Windows 摄像头 / 采集卡枚举与实时预览 Demo。
 
-## 功能
+- **平台**：Windows 10 / 11（x64）
+- **依赖**：OpenCV 4.x、CMake 3.10+、MSVC 2019 / 2022
+- **形态**：单文件实现（`main.cpp`），约 370 行
 
-1. 自动识别本机已连接的所有视频采集设备（摄像头、USB 采集卡等），
-   通过遍历设备索引 0..11 探测，连续 3 次打开失败即停止。
+## 简介
 
-2. 弹出设备选择窗口，列出设备索引与 DirectShow 友好名称，鼠标点击即可选中。
+直接 `VideoCapture(0)` 写死索引有两个坑：一是索引和设备没有稳定对应关系，插拔后可能指到别的摄像头；
+二是设备名含中文时，`putText` 和窗口标题都会乱码。
 
-3. 弹出实时画面窗口，持续显示所选设备的图像流；按 `ESC` 或 `q` 退出。
+本项目用一个最小可运行的例子，把完整流程走一遍：**枚举设备 → 鼠标选择 → 实时预览**。
+
+## 功能特性
+
+| 功能 | 说明 |
+| --- | --- |
+| 设备枚举 | 遍历索引 `0..11` 逐个 `open` 探测，连续 3 次失败即判定枚举结束 |
+| 友好名称 | 通过 DirectShow `ICreateDevEnum` 读取 `FriendlyName`，顺序与 OpenCV 的 DSHOW 后端一致 |
+| 鼠标选择 | 自绘设备列表窗口，悬停高亮、单击选中，无需控制台输入索引 |
+| 实时预览 | `CAP_PROP_BUFFERSIZE = 1` 最小化缓冲以降低延迟，按 `ESC` / `q` 退出 |
+| 中文设备名 | OpenCV `putText` 不支持中文，改用 GDI `DrawTextW` 在 32 位 DIB 上绘制后写回 `Mat` |
+| 中文窗口标题 | OpenCV 4.1.2 按本地代码页解析标题，UTF-8 需先转 ANSI 再传入 |
 
 ## 环境要求
 
-- 操作系统：Windows 10 / 11
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | Windows 10 / 11（x64） |
+| 编译器 | MSVC 2019 / 2022，需支持 C++17 |
+| 构建工具 | CMake 3.10 及以上 |
+| OpenCV | 4.x（开发环境为 4.1.2，对应 `opencv_world4120.dll`） |
 
-- 编译器：MSVC（Visual Studio 2019 / 2022，需支持 C++17）
+> DirectShow / GDI 相关代码仅在 Windows 下生效；其他平台只有基础回退分支，未做测试。
 
-- CMake：3.10 及以上
+## 快速开始
 
-- OpenCV：4.x（开发时使用 4.1.2，`opencv_world4120.dll`）
-
-## 构建
+### 1. 克隆仓库
 
 ```bat
-mkdir build && cd build
-cmake .. -DOpenCV_DIR=H:/opencv/build/x64/vc16/lib
-cmake --build . --config Release
-
+git clone https://github.com/X-Y-Z-R/cppShowCameraTest.git
+cd cppShowCameraTest
 ```
 
-> `-DOpenCV_DIR` 指向你自己的 OpenCV 安装目录（`build/x64/vc16/lib`）。
+### 2. 配置 OpenCV 路径（必做）
 
-> 也可先设置环境变量 `OpenCV_DIR` 后直接 `cmake ..`。
+打开 `CMakeLists.txt`，把第 12 行改成你本机 OpenCV 的 `lib` 目录：
 
-> 运行前请把 `opencv_world4120.dll` 复制到可执行文件同目录。
+```cmake
+# 原：set(OpenCV_DIR "H:/opencv/build/x64/vc16/lib")
+set(OpenCV_DIR "D:/opencv/build/x64/vc16/lib")
+```
 
-## 使用
+> ⚠️ 这里用的是普通 `set()`，会覆盖命令行传入的 `-DOpenCV_DIR`，所以**必须直接改这一行**，传参不生效。
+
+### 3. 构建
 
 ```bat
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
+若 `build/` 已存在其他生成器的缓存，换一个构建目录即可，例如 `-B build-vs2022`。
+
+### 4. 准备运行环境
+
+把 `opencv_world4120.dll` 复制到 exe 同级目录，否则会因找不到 DLL 而启动失败。
+构建产物位置：
+
+```text
+build/Release/cppShowCameraTest.exe
+```
+
+### 5. 运行
+
+```bat
+cd build\Release
 cppShowCameraTest.exe
-
 ```
 
-- 控制台输出检测到的设备数量；
+## 使用说明
 
-- 在选择窗口中点击目标设备；
-
-- 在画面窗口中按 `ESC` / `q` 关闭。
+1. 启动后控制台打印检测到的设备数量；
+2. 在**设备选择窗口**中鼠标点击目标设备（行格式为 `[索引] 设备名`，悬停高亮）；
+3. 进入**实时画面窗口**后按 `ESC` 或 `q` 退出；
+4. 在设备选择窗口按 `ESC` / `q` 视为取消，程序直接结束。
 
 ## 实现要点
 
 | 模块 | 说明 |
-|---|---|
-| 设备枚举 | `ICreateDevEnum` + `CLSID_VideoInputDeviceCategory` 读取 DirectShow `FriendlyName`，顺序与 OpenCV DSHOW 后端一致 |
-| 中文显示 | OpenCV `putText` 不支持中文，改用 GDI `DrawTextW` 在 32 位 DIB 上绘制后写回 `Mat` |
-| 窗口标题 | OpenCV 4.1.2 按本地代码页解析标题，UTF-8 需转 ANSI 后再传入 |
-| 低延迟 | `CAP_PROP_BUFFERSIZE = 1` 最小化缓冲 |
+| --- | --- |
+| 设备枚举 | `ICreateDevEnum` + `CLSID_VideoInputDeviceCategory` 读取 `FriendlyName` |
+| 探测策略 | 逐索引 `open`（Windows 固定 `CAP_DSHOW`），连续 3 次失败停止，避免 USB 设备漏检 |
+| 中文绘制 | `CreateDIBSection` 32 位位图 + `DrawTextW`，绘回 `Mat` 后转回 BGR |
+| 编码转换 | `utf8ToWide` / `utf8ToAnsi`，分别用于 GDI 绘制与窗口标题 |
+| 低延迟 | `CAP_PROP_BUFFERSIZE = 1`，只保留最新一帧 |
 
 ## 目录结构
-main.cpp 我想把这个demo作为1.0版本上传到github，我应该上传哪些文件？具体怎么做？
 
-10:08
-
-Chat
-
-任务耗时 1m 27s
-
-参考内容
-
-已读取 1 个文件，浏览 2 个目录
-
-思考
-
-已浏览
-
-cppShowCameraTest
-
-已浏览
-
-Camera
-
-思考
-
-已读取
-
-CMakeLists.txt
-
-思考
-
-我先看了目录结构和 CMakeLists.txt ，这个 demo 的"源码"其实只有 2 个文件，其余全是 CMake 生成的构建产物。下面给你一份可直接照做的方案。
-
-## 一、上传哪些文件（核心结论）
-只上传"源码 + 工程描述 + 说明文档"，一共 4~5 个文件：
-
-1
-2
-3
-4
-5
-6
-7
-
-`cppShowCameraTest/            ← 仓库根目录
-├── main.cpp                  ← 必须（唯一源码）
-├── CMakeLists.txt            ← 必须（构建脚本）
-├── README.md                 ← 必须（新建，项目说明）
-├── .gitignore                ← 必须（新建，排除构建产物）
-└── LICENSE                   ← 可选（建议 MIT）
-`
-
-### 绝对不要上传的内容
-路径 原因 `build/` 整个目录 CMake 生成物：`CMakeCache.txt` 、`*.vcxproj` 、`*.slnx` 、`CMakeFiles/` 、`.tlog` 等，全是本机路径相关，别人拿到也跑不了，还极占体积 `build/Release/*.exe` 、`*.dll` 二进制产物（含`opencv_world4120.dll` 、`vcruntime140.dll` 等），体积大且需随 OpenCV 版本变化 `build/Release.rar` 打包产物，应该放到 GitHub Release 附件里，而不是 Git 历史里 `CMakeCache.txt` 里面写死了`H:/opencv/...` 本机路径 `.vs/` 、`.vscode/` IDE 缓存（你的`Camera` 根目录和`cpp1` 、`cpp` 里都有）
-
-### ⚠️ 一个关键提醒：不要在 f:\BaiduNetdiskDownload\Camera 根目录执行 git init
-你的上级目录里还混着`cpp/` 、`cpp1/` 、`json-3.11.3/` （第三方库）、`recordings/*.mp4` 、`.vs/` 等一大堆东西。在根目录初始化仓库会把这些全部推上去（尤其 nlohmann/json 整个源码树、mp4 录制文件）。 请只在`cppShowCameraTest` 目录内初始化仓库 ，或者把该目录单独复制到一个干净位置（如`f:\repos\cppShowCameraTest` ）再初始化。
-
-## 二、新建两个必需文件
-### 1. .gitignore
-gitignore
-
-1
-2
-3
-4
-5
-6
-7
-8
-9
-10
-11
-12
-13
-14
-15
-16
-17
-18
-19
-20
-21
-22
-23
-24
-25
-26
-27
-28
-29
-30
-31
-32
-33
-34
-35
-36
-37
-38
-39
-40
-41
-42
-43
-44
-45
-46
-47
-48
-49
-50
-
-`
-# ---- CMake / 构建产物 ----
-build/
-out/
-cmake-build-*/
-CMakeCache.txt
-CMakeFiles/
-CMakeScripts/
-cmake_install.cmake
-install_manifest.txt
-*.sln
-*.slnx
-*.vcxproj
-*.vcxproj.filters
-*.vcxproj.user
-*.recipe
-*.tlog
-*.lastbuildstate
-
-# ---- 编译中间件 / 可执行文件 ----
-*.obj
-*.o
-*.pdb
-*.ilk
-*.exp
-*.lib
-*.exe
-*.dll
-*.so
-*.dylib
-
-# ---- 打包 / 媒体 ----
-*.rar
-*.zip
-*.7z
-*.mp4
-*.avi
-*.png
-*.jpg
-
-# ---- IDE ----
-.vs/
-.vscode/
-*.suo
-*.user
-
-# ---- 系统 ----
-Thumbs.db
-.DS_Store
-`
-
-### 2. README.md
-Markdown
-
-1
-2
-3
-4
-5
-6
-7
-8
-9
-10
-11
-12
-13
-14
-15
-16
-17
-18
-19
-20
-21
-22
-23
-24
-25
-26
-27
-28
-29
-30
-31
-32
-33
-34
-35
-36
-37
-38
-39
-40
-41
-42
-43
-44
-45
-46
-47
-48
-49
-50
-51
-52
-53
-54
-55
-56
-57
-58
-59
-60
-61
-62
-63
-
-`
-# cppShowCameraTest
-
-一个基于 **C++17 + OpenCV + DirectShow** 的 Windows 摄像头 / 采集卡枚举与实时预览小工具。
-
-## 功能
-
-1. 自动识别本机已连接的所有视频采集设备（摄像头、USB 采集卡等），
-   通过遍历设备索引 0..11 探测，连续 3 次打开失败即停止。
-
-2. 弹出设备选择窗口，列出设备索引与 DirectShow 友好名称，鼠标点击即可选中。
-
-3. 弹出实时画面窗口，持续显示所选设备的图像流；按 `ESC` 或 `q` 退出。
-
-## 环境要求
-
-- 操作系统：Windows 10 / 11
-
-- 编译器：MSVC（Visual Studio 2019 / 2022，需支持 C++17）
-
-- CMake：3.10 及以上
-
-- OpenCV：4.x（开发时使用 4.1.2，`opencv_world4120.dll`）
-
-## 构建
-
-```bat
-mkdir build && cd build
-cmake .. -DOpenCV_DIR=H:/opencv/build/x64/vc16/lib
-cmake --build . --config Release
-
+```text
+cppShowCameraTest/
+├── main.cpp          # 全部实现：设备枚举 / 选择窗口 / 实时预览
+├── CMakeLists.txt    # CMake 构建脚本
+├── README.md
+└── .gitignore        # 排除 build/、exe、dll 等构建产物
 ```
 
-> `-DOpenCV_DIR` 指向你自己的 OpenCV 安装目录（`build/x64/vc16/lib`）。
+## 常见问题
 
-> 也可先设置环境变量 `OpenCV_DIR` 后直接 `cmake ..`。
+### 提示"未检测到任何摄像头或采集卡"
 
-> 运行前请把 `opencv_world4120.dll` 复制到可执行文件同目录。
+- 确认设备管理器中有"图像设备"/"摄像头"，且驱动正常；
+- 关闭可能占用摄像头的程序（会议软件、浏览器、其他预览工具）；
+- 探测是"连续 3 次失败即停止"，若设备索引中间存在空档，后面的设备可能被提前截断，
+  可把 `listDevices()` 里的上限 `12` 调大。
 
-## 使用
+### 设备名或窗口标题出现乱码
 
-```bat
-cppShowCameraTest.exe
+- 控制台依赖 `SetConsoleOutputCP(CP_UTF8)`，旧版控制台可能需要手动 `chcp 65001`；
+- 窗口标题会经 `utf8ToAnsi` 转本地代码页，若系统区域设置不是中文（GBK），可能显示异常；
+- 图片上的中文依赖 `Microsoft YaHei` 字体，精简版系统若缺字体需自行安装。
 
-```
+### 打开设备失败或画面黑屏
 
-- 控制台输出检测到的设备数量；
+- 同一时刻一个设备通常只能被一个进程占用，先关闭其他预览程序；
+- Windows 下必须使用 `CAP_DSHOW` 后端，换成 `CAP_MSMF` 行为会不同；
+- 部分采集卡不支持 `640x480`，`set()` 失败时可注释掉分辨率设置再试。
 
-- 在选择窗口中点击目标设备；
+### 启动报错缺少 `opencv_world4120.dll`
 
-- 在画面窗口中按 `ESC` / `q` 关闭。
+把 OpenCV 安装目录 `build/x64/vc16/bin` 下的 `opencv_world4120.dll` 复制到 exe 同级目录；
+若还提示缺少 `vcruntime140.dll` / `msvcp140.dll`，安装对应版本的 VC++ 运行库。
 
-## 实现要点
+## v1.0 范围
 
-| 模块 | 说明 |
-|---|---|
-| 设备枚举 | `ICreateDevEnum` + `CLSID_VideoInputDeviceCategory` 读取 DirectShow `FriendlyName`，顺序与 OpenCV DSHOW 后端一致 |
-| 中文显示 | OpenCV `putText` 不支持中文，改用 GDI `DrawTextW` 在 32 位 DIB 上绘制后写回 `Mat` |
-| 窗口标题 | OpenCV 4.1.2 按本地代码页解析标题，UTF-8 需转 ANSI 后再传入 |
-| 低延迟 | `CAP_PROP_BUFFERSIZE = 1` 最小化缓冲 |
+已实现：设备枚举与友好名称、鼠标选择窗口、单设备实时预览、中文显示。
 
-## 目录结构
-.
-├── main.cpp          # 全部实现（枚举 / 选择窗口 / 预览窗口）
-├── CMakeLists.txt    # 构建脚本
-└── README.md
+暂未实现：动态切换分辨率、录制、多设备同时预览、记住上次选择的设备。
 
-## 版本
+## 版本记录
 
-- **v1.0.0** — 首个版本：设备枚举、鼠标选择、实时预览。
+| 版本 | 内容 |
+| --- | --- |
+| v1.0.0 | 首个版本：设备枚举、鼠标选择、实时预览 |
 
 ## License
 
