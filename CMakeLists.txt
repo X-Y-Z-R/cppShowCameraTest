@@ -31,6 +31,8 @@ add_executable(cppShowCameraTest
     capturethread.cpp
     processorthread.h
     processorthread.cpp
+    detector.h
+    detector.cpp
     framequeue.h
     framequeue.cpp
     cameradevice.h

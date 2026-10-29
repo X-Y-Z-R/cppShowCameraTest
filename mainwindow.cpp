@@ -91,11 +91,15 @@ MainWindow::MainWindow(QWidget* parent)
       m_deviceCaption(nullptr),
       m_toggleButton(nullptr),
       m_slowProcessCheck(nullptr),
+      m_detectCheck(nullptr),
+      m_darkObjectCheck(nullptr),
       m_frameLabel(nullptr),
       m_stateLabel(nullptr),
       m_deviceNameLabel(nullptr),
       m_resolutionLabel(nullptr),
       m_fpsLabel(nullptr),
+      m_detectionLabel(nullptr),
+      m_processTimeLabel(nullptr),
       m_statsLabel(nullptr),
       m_capture(nullptr),
       m_processor(nullptr),
@@ -104,6 +108,11 @@ MainWindow::MainWindow(QWidget* parent)
       m_state(State::Idle),
       m_captureFps(0.0),
       m_processFps(0.0),
+      m_avgProcessMs(0.0),
+      m_maxProcessMs(0.0),
+      m_okTotal(0),
+      m_ngTotal(0),
+      m_currentCount(0),
       m_captureQueue(std::make_shared<FrameQueue>(kQueueCapacity)),
       m_displayQueue(std::make_shared<FrameQueue>(kQueueCapacity)) {
     setupUi();
@@ -191,19 +200,44 @@ void MainWindow::setupUi() {
         }
     });
 
+    // 示例检测开关：默认开启，关闭后即为阶段 2 的纯预览直通模式
+    m_detectCheck = new QCheckBox(QStringLiteral("启用检测（OK / NG 计数）"), deviceGroup);
+    m_detectCheck->setChecked(true);
+    m_detectCheck->setToolTip(
+        QStringLiteral("开启后每帧执行阈值分割 + 轮廓检测，并统计 OK / NG 数量"));
+    connect(m_detectCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_processor) {
+            m_processor->setDetectionEnabled(checked);
+        }
+    });
+
+    // 极性开关：默认关闭 = 浅色工件 / 深色背景；勾选后 = 深色工件 / 浅色背景（如浅色桌面上的手机）
+    m_darkObjectCheck = new QCheckBox(QStringLiteral("深色工件（浅色背景）"), deviceGroup);
+    m_darkObjectCheck->setToolTip(
+        QStringLiteral("勾选后改用反向阈值，检测比背景暗的长方形工件；切换时会清零计数"));
+    connect(m_darkObjectCheck, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_processor) {
+            m_processor->setBrightObject(!checked);
+        }
+    });
+
     deviceLayout->addWidget(m_deviceCaption);
     deviceLayout->addWidget(m_deviceList);
     deviceLayout->addWidget(m_toggleButton);
     deviceLayout->addWidget(m_slowProcessCheck);
+    deviceLayout->addWidget(m_detectCheck);
+    deviceLayout->addWidget(m_darkObjectCheck);
 
     auto* infoGroup = new QGroupBox(QStringLiteral("设备信息"), panel);
     auto* infoLayout = new QVBoxLayout(infoGroup);
     infoLayout->setSpacing(6);
 
-    m_stateLabel      = new QLabel(QStringLiteral("状态：未连接"), infoGroup);
-    m_deviceNameLabel = new QLabel(QStringLiteral("设备：--"), infoGroup);
-    m_resolutionLabel = new QLabel(QStringLiteral("分辨率：--"), infoGroup);
-    m_fpsLabel        = new QLabel(QStringLiteral("帧率：--"), infoGroup);
+    m_stateLabel        = new QLabel(QStringLiteral("状态：未连接"), infoGroup);
+    m_deviceNameLabel   = new QLabel(QStringLiteral("设备：--"), infoGroup);
+    m_resolutionLabel   = new QLabel(QStringLiteral("分辨率：--"), infoGroup);
+    m_fpsLabel          = new QLabel(QStringLiteral("帧率：--"), infoGroup);
+    m_detectionLabel    = new QLabel(QStringLiteral("检测：当前 0 │ OK 0 │ NG 0"), infoGroup);
+    m_processTimeLabel  = new QLabel(QStringLiteral("处理耗时：--"), infoGroup);
 
     m_deviceNameLabel->setWordWrap(true);
 
@@ -211,6 +245,8 @@ void MainWindow::setupUi() {
     infoLayout->addWidget(m_deviceNameLabel);
     infoLayout->addWidget(m_resolutionLabel);
     infoLayout->addWidget(m_fpsLabel);
+    infoLayout->addWidget(m_detectionLabel);
+    infoLayout->addWidget(m_processTimeLabel);
 
     panelLayout->addWidget(deviceGroup);
     panelLayout->addWidget(infoGroup);
@@ -231,9 +267,10 @@ void MainWindow::setupUi() {
     rootLayout->addWidget(m_frameLabel, 1);
     setCentralWidget(central);
 
-    // 状态栏常驻监控：采集帧率 / 处理帧率 / 两个队列的深度
-    m_statsLabel = new QLabel(QStringLiteral("采集 -- │ 处理 -- │ 队列 --"), this);
-    m_statsLabel->setToolTip(QStringLiteral("采集帧率 │ 处理帧率 │ 采集队列 / 显示队列深度"));
+    // 状态栏常驻监控：采集帧率 / 处理帧率 / 处理耗时 / 两个队列的深度
+    m_statsLabel = new QLabel(QStringLiteral("采集 -- │ 处理 -- │ 耗时 -- │ 队列 --"), this);
+    m_statsLabel->setToolTip(
+        QStringLiteral("采集帧率 │ 处理帧率 │ 平均单帧处理耗时 │ 采集队列 / 显示队列深度"));
     statusBar()->addPermanentWidget(m_statsLabel);
 
     statusBar()->showMessage(QStringLiteral("就绪"));
@@ -351,17 +388,28 @@ void MainWindow::onToggleClicked() {
         m_lastError.clear();
         m_captureFps = 0.0;
         m_processFps = 0.0;
+        m_avgProcessMs = 0.0;
+        m_maxProcessMs = 0.0;
+        m_okTotal = 0;
+        m_ngTotal = 0;
+        m_currentCount = 0;
+        m_detectionLabel->setText(QStringLiteral("检测：当前 0 │ OK 0 │ NG 0"));
+        m_processTimeLabel->setText(QStringLiteral("处理耗时：--"));
 
         // 队列重新打开并清空上一轮的残留帧
         m_captureQueue->reopen();
         m_displayQueue->reopen();
 
-        // 处理线程：从采集队列取帧 → 处理 → 写入显示队列
+        // 处理线程：从采集队列取帧 → 检测 / 计数 → 写入显示队列
         m_processor = new ProcessThread(m_captureQueue, m_displayQueue);
         m_processor->setArtificialDelayMs(m_slowProcessCheck->isChecked()
                                               ? kSlowProcessDelayMs
                                               : 0);
+        m_processor->setDetectionEnabled(m_detectCheck->isChecked());
+        m_processor->setBrightObject(!m_darkObjectCheck->isChecked());
         connect(m_processor, &ProcessThread::statsUpdated, this, &MainWindow::onProcessStats);
+        connect(m_processor, &ProcessThread::detectionUpdated, this,
+                &MainWindow::onDetectionStats);
         connect(m_processor, &QThread::finished, this, &MainWindow::onProcessorFinished);
 
         // 采集线程：只负责读帧并写入采集队列；原始名称用于断流后重新定位设备索引
@@ -408,6 +456,7 @@ void MainWindow::stopCapture() {
     }
     if (m_processor) {
         disconnect(m_processor, &ProcessThread::statsUpdated, this, nullptr);
+        disconnect(m_processor, &ProcessThread::detectionUpdated, this, nullptr);
         m_processor->requestStop();
     }
 
@@ -445,9 +494,33 @@ void MainWindow::onCaptureStats(double fps) {
     }
 }
 
-void MainWindow::onProcessStats(double fps) {
+void MainWindow::onProcessStats(double fps, double avgProcessMs, double maxProcessMs) {
     m_processFps = fps;
-    if (m_state == State::Streaming) updateStatsLabel();
+    m_avgProcessMs = avgProcessMs;
+    m_maxProcessMs = maxProcessMs;
+    if (m_state == State::Streaming) {
+        m_processTimeLabel->setText(QStringLiteral("耗时：%1 ms（峰值 %2 ms）")
+                                        .arg(m_avgProcessMs, 0, 'f', 1)
+                                        .arg(m_maxProcessMs, 0, 'f', 1));
+        updateStatsLabel();
+    }
+}
+
+void MainWindow::onDetectionStats(int okTotal, int ngTotal, int currentCount) {
+    m_okTotal = okTotal;
+    m_ngTotal = ngTotal;
+    m_currentCount = currentCount;
+
+    if (m_state != State::Streaming) return;
+
+    if (!m_detectCheck->isChecked()) {
+        m_detectionLabel->setText(QStringLiteral("检测：已关闭"));
+        return;
+    }
+    m_detectionLabel->setText(QStringLiteral("检测：当前 %1 │ OK %2 │ NG %3")
+                                  .arg(m_currentCount)
+                                  .arg(m_okTotal)
+                                  .arg(m_ngTotal));
 }
 
 void MainWindow::onCaptureLog(const QString& message) {
@@ -471,9 +544,10 @@ void MainWindow::onStatsTick() {
 
 void MainWindow::updateStatsLabel() {
     m_statsLabel->setText(
-        QStringLiteral("采集 %1 FPS │ 处理 %2 FPS │ 队列 %3 / %4")
+        QStringLiteral("采集 %1 FPS │ 处理 %2 FPS │ 耗时 %3 ms │ 队列 %4 / %5")
             .arg(m_captureFps, 0, 'f', 1)
             .arg(m_processFps, 0, 'f', 1)
+            .arg(m_avgProcessMs, 0, 'f', 1)
             .arg(m_captureQueue->size())
             .arg(m_displayQueue->size()));
 }
@@ -496,6 +570,7 @@ void MainWindow::onCaptureFinished() {
     m_displayQueue->close();
     if (m_processor) {
         disconnect(m_processor, &ProcessThread::statsUpdated, this, nullptr);
+        disconnect(m_processor, &ProcessThread::detectionUpdated, this, nullptr);
         m_processor->requestStop();
     }
 
@@ -557,13 +632,20 @@ void MainWindow::clearFrame() {
     m_deviceNameLabel->setText(QStringLiteral("设备：--"));
     m_resolutionLabel->setText(QStringLiteral("分辨率：--"));
     m_fpsLabel->setText(QStringLiteral("帧率：--"));
+    m_detectionLabel->setText(QStringLiteral("检测：当前 0 │ OK 0 │ NG 0"));
+    m_processTimeLabel->setText(QStringLiteral("处理耗时：--"));
 
     // 清空流水线残留数据与统计值
     m_captureQueue->clear();
     m_displayQueue->clear();
     m_captureFps = 0.0;
     m_processFps = 0.0;
-    m_statsLabel->setText(QStringLiteral("采集 -- │ 处理 -- │ 队列 --"));
+    m_avgProcessMs = 0.0;
+    m_maxProcessMs = 0.0;
+    m_okTotal = 0;
+    m_ngTotal = 0;
+    m_currentCount = 0;
+    m_statsLabel->setText(QStringLiteral("采集 -- │ 处理 -- │ 耗时 -- │ 队列 --"));
 }
 
 

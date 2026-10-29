@@ -77,9 +77,17 @@ private slots:
     // @param fps 每秒采集帧数
     void onCaptureStats(double fps);
 
-    // 处理帧率更新（每秒一次）。
-    // @param fps 每秒处理帧数
-    void onProcessStats(double fps);
+    // 处理帧率与耗时更新（每秒一次）。
+    // @param fps          每秒处理帧数
+    // @param avgProcessMs 平均单帧处理耗时（毫秒）
+    // @param maxProcessMs 峰值单帧处理耗时（毫秒）
+    void onProcessStats(double fps, double avgProcessMs, double maxProcessMs);
+
+    // 检测计数更新（每秒一次）。
+    // @param okTotal      累计 OK 数
+    // @param ngTotal      累计 NG 数
+    // @param currentCount 当前画面中的稳定目标数
+    void onDetectionStats(int okTotal, int ngTotal, int currentCount);
 
     // 界面刷新定时器：从显示队列取最新帧刷新画面，绝不阻塞。
     void onDisplayTick();
@@ -120,19 +128,23 @@ private:
     // 停止并回收处理线程（阻塞等待，仅用于窗口关闭 / 析构等同步场景）。
     void shutdownProcessor();
 
-    // 刷新状态栏中的采集 / 处理帧率与队列深度。
+    // 刷新状态栏中的采集 / 处理帧率、处理耗时与队列深度。
     void updateStatsLabel();
 
     QListWidget*   m_deviceList;        ///< 可用设备列表（全部设备一次列出）
     QLabel*        m_deviceCaption;     ///< 设备数量提示
     QPushButton*   m_toggleButton;      ///< 打开 / 关闭按钮
     QCheckBox*     m_slowProcessCheck;  ///< 模拟处理耗时开关（验收用）
+    QCheckBox*     m_detectCheck;       ///< 示例检测开关（默认开启）
+    QCheckBox*     m_darkObjectCheck;   ///< 深色工件开关（勾选则反向阈值，默认关闭）
     QLabel*        m_frameLabel;        ///< 画面显示区域
     QLabel*        m_stateLabel;        ///< 连接状态文本
     QLabel*        m_deviceNameLabel;   ///< 设备名称文本
     QLabel*        m_resolutionLabel;   ///< 分辨率文本
     QLabel*        m_fpsLabel;          ///< 帧率文本
-    QLabel*        m_statsLabel;        ///< 状态栏监控文本（帧率 + 队列深度）
+    QLabel*        m_detectionLabel;    ///< 检测计数文本（当前 / OK / NG）
+    QLabel*        m_processTimeLabel;  ///< 处理耗时文本（平均 / 峰值）
+    QLabel*        m_statsLabel;        ///< 状态栏监控文本（帧率 + 耗时 + 队列深度）
 
     CaptureThread* m_capture;           ///< 当前采集线程，未打开时为空
     ProcessThread* m_processor;         ///< 当前处理线程，未打开时为空
@@ -143,6 +155,11 @@ private:
     QImage         m_lastFrame;         ///< 最近一帧画面
     double         m_captureFps;        ///< 最近一次采集帧率
     double         m_processFps;        ///< 最近一次处理帧率
+    double         m_avgProcessMs;      ///< 最近统计窗口的平均处理耗时
+    double         m_maxProcessMs;      ///< 最近统计窗口的峰值处理耗时
+    int            m_okTotal;           ///< 累计 OK 数
+    int            m_ngTotal;           ///< 累计 NG 数
+    int            m_currentCount;      ///< 当前画面中的稳定目标数
     QString        m_currentDeviceName; ///< 当前设备名称
     QString        m_lastError;         ///< 最近一次终止性错误信息
 
